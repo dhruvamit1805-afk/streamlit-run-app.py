@@ -7,3 +7,6 @@ nltk
 xgboost
 scikit-learn
 requests
+groq
+shap
+altair
