@@ -4,3 +4,6 @@ pandas
 numpy
 feedparser
 nltk
+xgboost
+scikit-learn
+requests
