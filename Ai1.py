@@ -4,140 +4,265 @@ import pandas as pd
 import numpy as np
 import feedparser
 import urllib.parse
+import requests
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from xgboost import XGBClassifier
 import nltk
 
-# Download free sentiment lexicon
+# Download free NLTK sentiment lexicon
 nltk.download('vader_lexicon', quiet=True)
 
-st.set_page_config(page_title="Free AI Stock & News Predictor", layout="wide")
-st.title("📈 AI Stock & Global News Analyzer")
-st.caption("Powered by Open-Source Sentiment AI & Quantitative Analysis ($0 Cost Stack)")
+# Streamlit Page Config
+st.set_page_config(
+    page_title="AI Market Intelligence Platform",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# --- CACHED DATA FETCHING (Prevents Rate-Limit Errors) ---
-@st.cache_data(ttl=3600)  # Cache results for 1 hour (3600 seconds)
+# --- CUSTOM MODERN DARK UI STYLING ---
+st.markdown("""
+<style>
+    .main {
+        background-color: #0E1117;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #1E2640 0%, #111827 100%);
+        border: 1px solid #374151;
+        border-radius: 12px;
+        padding: 20px;
+        color: white;
+        text-align: center;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+    }
+    .metric-value {
+        font-size: 28px;
+        font-weight: 700;
+        margin-top: 5px;
+    }
+    .metric-label {
+        font-size: 14px;
+        color: #9CA3AF;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .signal-bullish {
+        background-color: rgba(16, 185, 129, 0.1);
+        border: 1px solid #10B981;
+        color: #34D399;
+        padding: 15px;
+        border-radius: 10px;
+        font-weight: bold;
+        font-size: 20px;
+        text-align: center;
+    }
+    .signal-bearish {
+        background-color: rgba(239, 68, 68, 0.1);
+        border: 1px solid #EF4444;
+        color: #F87171;
+        padding: 15px;
+        border-radius: 10px;
+        font-weight: bold;
+        font-size: 20px;
+        text-align: center;
+    }
+    .signal-neutral {
+        background-color: rgba(245, 158, 11, 0.1);
+        border: 1px solid #F59E0B;
+        color: #FBBF24;
+        padding: 15px;
+        border-radius: 10px;
+        font-weight: bold;
+        font-size: 20px;
+        text-align: center;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("⚡ Pro AI Market Intelligence & Predictive Signal Engine")
+st.caption("Powered by XGBoost Machine Learning, Global NLP Sentiment Analysis & Quantitative Analytics")
+
+# --- COMPANY NAME TO TICKER SEARCH FUNCTION ---
+@st.cache_data(ttl=86400)
+def search_company_ticker(query):
+    """Searches Yahoo Finance API for tickers based on company name."""
+    if not query or len(query) < 2:
+        return []
+    try:
+        url = "https://query2.finance.yahoo.com/v1/finance/search"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        params = {'q': query, 'quotesCount': 8, 'newsCount': 0}
+        response = requests.get(url, headers=headers, params=params, timeout=5)
+        data = response.json()
+        
+        results = []
+        if 'quotes' in data:
+            for quote in data['quotes']:
+                if 'symbol' in quote and 'shortname' in quote:
+                    exch = quote.get('exchDisp', 'Global')
+                    results.append(f"{quote['shortname']} ({quote['symbol']}) — {exch}")
+                elif 'symbol' in quote:
+                    results.append(f"{quote['symbol']} ({quote['symbol']})")
+        return results
+    except Exception:
+        return []
+
+# --- CACHED MARKET & NEWS DATA FETCHING ---
+@st.cache_data(ttl=3600)
 def fetch_stock_data(symbol):
     try:
-        # Download history directly without touching stock.info (prevents YFRateLimitError)
-        df = yf.download(symbol, period="180d", interval="1d", progress=False)
-        
+        df = yf.download(symbol, period="365d", interval="1d", progress=False)
         if df.empty:
             return None
 
-        # Fix multi-index columns if yfinance returns them
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Calculate Technical Indicators
+        # Quantitative Indicators
         df['Returns'] = df['Close'].pct_change()
         
-        # 14-Day Relative Strength Index (RSI)
+        # 14-Day RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
         
-        # 20-Day Simple Moving Average
+        # Moving Averages
         df['SMA_20'] = df['Close'].rolling(window=20).mean()
+        df['SMA_50'] = df['Close'].rolling(window=50).mean()
         
+        # Volatility & Volume change
+        df['Volatility'] = df['Returns'].rolling(window=20).std()
+        df['Volume_Change'] = df['Volume'].pct_change()
+
         return df
-    except Exception as e:
-        st.error(f"Error fetching stock data: {e}")
+    except Exception:
         return None
 
-@st.cache_data(ttl=1800)  # Cache news for 30 minutes
-def fetch_rss_news(symbol):
+@st.cache_data(ttl=1800)
+def fetch_rss_news(query_term):
     try:
-        # Free Google News RSS Feed
-        query = f"{symbol} stock market news"
-        encoded_query = urllib.parse.quote(query)
-        feed_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
+        encoded = urllib.parse.quote(f"{query_term} stock market news")
+        feed_url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
         feed = feedparser.parse(feed_url)
         
         headlines = []
-        for entry in feed.entries[:5]:  # Top 5 headlines
+        for entry in feed.entries[:6]:
             headlines.append({
                 "title": entry.title,
                 "link": entry.link,
                 "published": entry.published if hasattr(entry, 'published') else "Recent"
             })
         return headlines
-    except Exception as e:
+    except Exception:
         return []
 
-# --- USER INPUT SECTION ---
-ticker = st.text_input("Enter Stock Ticker (e.g., NVDA, AAPL, TSLA, MSFT):", "NVDA").upper().strip()
-
-if st.button("Run AI Market Flow Analysis"):
-    if not ticker:
-        st.warning("Please enter a valid stock ticker.")
+# --- SIDEBAR & SEARCH INTERFACE ---
+with st.sidebar:
+    st.header("🔍 Stock Lookup")
+    search_input = st.text_input("Type Company Name:", "Nvidia")
+    
+    ticker_options = search_company_ticker(search_input)
+    
+    if ticker_options:
+        selected_option = st.selectbox("Select Matching Company:", ticker_options)
+        # Extract ticker symbol from parentheses
+        selected_ticker = selected_option.split("(")[-1].split(")")[0]
     else:
-        with st.spinner(f"Analyzing price flow & global news sentiment for {ticker}..."):
-            df = fetch_stock_data(ticker)
+        st.info("Searching for ticker or type symbol manually below...")
+        selected_ticker = st.text_input("Manual Ticker Code:", "NVDA").upper()
+
+    st.markdown("---")
+    st.markdown("### ⚙️ Engine Settings")
+    prediction_horizon = st.slider("Prediction Target Window:", 1, 10, 3, help="Days ahead for model forecast")
+
+# --- MAIN ENGINE RUN ---
+if st.button("🚀 Execute AI Market Analysis", type="primary", use_container_width=True):
+    with st.spinner(f"Training XGBoost Engine & Scraping Global News Flow for {selected_ticker}..."):
+        df = fetch_stock_data(selected_ticker)
+        
+        if df is None or len(df) < 60:
+            st.error("Could not fetch sufficient market data for this stock symbol.")
+        else:
+            news_items = fetch_rss_news(selected_ticker)
             
-            if df is None or len(df) < 20:
-                st.error("Unable to retrieve stock data or ticker symbol is invalid. Please double-check the symbol.")
+            # --- NLP NEWS SENTIMENT ENGINE ---
+            sia = SentimentIntensityAnalyzer()
+            sentiment_scores = []
+            for item in news_items:
+                s = sia.polarity_scores(item['title'])['compound']
+                sentiment_scores.append(s)
+            
+            avg_sentiment = float(np.mean(sentiment_scores)) if sentiment_scores else 0.0
+            
+            # --- ADVANCED XGBOOST MODEL TRAINING ---
+            df['News_Sentiment'] = avg_sentiment
+            df['Target'] = (df['Close'].shift(-prediction_horizon) > df['Close']).astype(int)
+            
+            features = ['Returns', 'RSI', 'Volatility', 'Volume_Change', 'News_Sentiment']
+            clean_df = df.dropna(subset=features + ['Target'])
+            
+            X = clean_df[features]
+            y = clean_df['Target']
+            
+            # Train model on historical sequences
+            model = XGBClassifier(n_estimators=40, max_depth=3, learning_rate=0.05, eval_metric='logloss')
+            model.fit(X[:-1], y[:-1])
+            
+            # Predict on latest live state
+            latest_features = X.iloc[[-1]]
+            boost_prob = float(model.predict_proba(latest_features)[0][1]) * 100
+            
+            # Metric Extract
+            latest_price = float(df['Close'].iloc[-1])
+            latest_rsi = float(df['RSI'].iloc[-1]) if not pd.isna(df['RSI'].iloc[-1]) else 50.0
+            price_change = float(df['Returns'].iloc[-1]) * 100
+            
+            # --- DASHBOARD LAYOUT ---
+            st.markdown("### 📊 Market Flow Indicators")
+            c1, c2, c3, c4 = st.columns(4)
+            
+            with c1:
+                st.markdown(f'<div class="metric-card"><div class="metric-label">Current Price</div><div class="metric-value">${latest_price:.2f} ({price_change:+.2f}%)</div></div>', unsafe_allow_html=True)
+            with c2:
+                st.markdown(f'<div class="metric-card"><div class="metric-label">RSI (14-Day)</div><div class="metric-value">{latest_rsi:.1f}</div></div>', unsafe_allow_html=True)
+            with c3:
+                st.markdown(f'<div class="metric-card"><div class="metric-label">News Sentiment</div><div class="metric-value">{avg_sentiment:+.2f}</div></div>', unsafe_allow_html=True)
+            with c4:
+                st.markdown(f'<div class="metric-card"><div class="metric-label">AI Boost Forecast</div><div class="metric-value">{boost_prob:.1f}%</div></div>', unsafe_allow_html=True)
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # --- PREDICTION BANNER ---
+            if boost_prob >= 60.0:
+                st.markdown(f'<div class="signal-bullish">🚀 STRONG BUY / BOOST SIGNAL — {boost_prob:.1f}% AI Probability of Price Increase in {prediction_horizon} Days</div>', unsafe_allow_html=True)
+            elif boost_prob <= 40.0:
+                st.markdown(f'<div class="signal-bearish">⚠️ BEARISH / RISK SIGNAL — High Risk of Pullback ({boost_prob:.1f}% Growth Probability)</div>', unsafe_allow_html=True)
             else:
-                news_items = fetch_rss_news(ticker)
+                st.markdown(f'<div class="signal-neutral">⚖️ NEUTRAL / CONSOLIDATION — Market Flow is Range-Bound ({boost_prob:.1f}% Probability)</div>', unsafe_allow_html=True)
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # --- CHARTS ---
+            col_chart, col_news = st.columns([2, 1])
+            
+            with col_chart:
+                st.subheader("📈 Price Action & Trend Analysis")
+                st.line_chart(df[['Close', 'SMA_20', 'SMA_50']])
                 
-                # --- SENTIMENT ANALYSIS ---
-                sia = SentimentIntensityAnalyzer()
-                sentiment_scores = []
-                for item in news_items:
-                    score = sia.polarity_scores(item['title'])['compound']
-                    sentiment_scores.append(score)
-                
-                avg_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0.0
-                
-                # --- CALCULATE PREDICTIVE BOOST SIGNAL ---
-                latest_price = float(df['Close'].iloc[-1])
-                latest_rsi = float(df['RSI'].iloc[-1]) if not pd.isna(df['RSI'].iloc[-1]) else 50.0
-                monthly_return = float((df['Close'].iloc[-1] - df['Close'].iloc[-20]) / df['Close'].iloc[-20])
-                
-                # RSI Score Normalization
-                if 40 <= latest_rsi <= 65:
-                    rsi_signal = 0.5   # Healthy momentum
-                elif latest_rsi > 70:
-                    rsi_signal = -0.5  # Overbought warning
-                else:
-                    rsi_signal = 0.2   # Oversold bounce potential
-                
-                # Composite Boost Formula (40% News Sentiment + 40% RSI Momentum + 20% Monthly Return)
-                boost_score = (avg_sentiment * 0.4) + (rsi_signal * 0.4) + (monthly_return * 0.2)
-                
-                # --- DISPLAY METRICS ---
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Current Price", f"${latest_price:.2f}")
-                col2.metric("RSI (14-Day)", f"{latest_rsi:.1f}")
-                col3.metric("News Sentiment", f"{avg_sentiment:+.2f}")
-                col4.metric("AI Boost Score", f"{boost_score:+.2f}")
-                
-                st.markdown("---")
-                
-                # Signal Output Banner
-                if boost_score > 0.15:
-                    st.success("🚀 **Signal: High Probability of Upward Boost**")
-                elif boost_score < -0.15:
-                    st.error("⚠️ **Signal: Bearish / Risk of Downward Pullback**")
-                else:
-                    st.warning("⚖️ **Signal: Neutral / Consolidation Flow**")
-                
-                # --- CHART DISPLAY ---
-                st.subheader("Market Flow: Closing Price vs 20-Day Moving Average")
-                st.line_chart(df[['Close', 'SMA_20']])
-                
-                # --- NEWS HEADLINES DISPLAY ---
-                st.subheader("Global News Sentiment Feed")
+            with col_news:
+                st.subheader("🌍 Live Global News Feed")
                 if news_items:
-                    for item, s_score in zip(news_items, sentiment_scores):
-                        if s_score > 0.05:
-                            tag = "🟢 POSITIVE"
-                        elif s_score < -0.05:
-                            tag = "🔴 NEGATIVE"
+                    for item, score in zip(news_items, sentiment_scores):
+                        if score > 0.05:
+                            badge = "🟢 POSITIVE"
+                        elif score < -0.05:
+                            badge = "🔴 NEGATIVE"
                         else:
-                            tag = "⚪ NEUTRAL"
-                        
-                        st.markdown(f"- **[{tag}]** [{item['title']}]({item['link']})")
+                            badge = "⚪ NEUTRAL"
+                        st.markdown(f"**[{badge}]** [{item['title']}]({item['link']})")
+                        st.caption(f"Published: {item['published']}")
+                        st.markdown("---")
                 else:
-                    st.info("No recent news headlines available for this ticker.")
+                    st.info("No recent news feed available.")
